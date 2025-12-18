@@ -47,16 +47,14 @@ def main():
 
     logger.info(f"Scheduler started. Scraper set to run at {SCRAPE_TIME}")
     schedule.every().day.at(SCRAPE_TIME).do(run_scraper)
-
     schedule.every().day.at("23:55").do(create_dump)
 
-
-    logger.info("Running initial scrape on startup...")
-    run_scraper()
-    create_dump()
-
     while True:
-        schedule.run_pending()
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            logger.error(f"Critical error in scheduler: {e}", exc_info=True)
+
         time.sleep(60)
 
 
