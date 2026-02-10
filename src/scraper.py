@@ -10,7 +10,7 @@ from parsel import Selector
 from src.crud import create_car
 from src.config import BASE_URL
 from src.utils import clean_price, clean_odometer
-from src.database import engine
+
 
 
 logger = logging.getLogger(__name__)
@@ -286,8 +286,7 @@ async def run_scraper():
             if task.exception():
                 logger.error(f"One worker failed with error: {task.exception()}")
 
-    logger.info("Cleaning up database connections...")
-    await engine.dispose()
+
 
     logger.info("All scraping finished successfully.")
 

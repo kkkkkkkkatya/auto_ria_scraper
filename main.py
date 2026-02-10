@@ -3,16 +3,11 @@ import schedule
 import logging
 import asyncio
 import os
-
-from sqlalchemy.exc import OperationalError
-from sqlalchemy import text
+from tortoise import Tortoise
 
 from src.scraper import run_scraper
 from src.dumper import create_dump
-from src.database import engine
-from src.models import Base
-from src.config import SCRAPE_TIME
-
+from src.config import SCRAPE_TIME, TORTOISE_ORM
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,75 +16,56 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def wait_for_db():
-    """Асинхронна перевірка доступності БД."""
-    logger.info("Waiting for database...")
-
-    while True:
-        try:
-            async with engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
-
-            logger.info("Database available!")
-            return
-        except OperationalError:
-            logger.warning("Database unavailable, waiting 1 second...")
-            await asyncio.sleep(1)
-        except Exception as e:
-            logger.error(f"Unknown DB error: {e}")
-            await asyncio.sleep(1)
-
-
 async def init_db():
-    """Асинхронне створення таблиць."""
-    logger.info("Initializing database...")
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    logger.info("Database initialized.")
+    logger.info("Initializing Tortoise ORM...")
+    await Tortoise.init(config=TORTOISE_ORM)
+    await Tortoise.generate_schemas()
+    logger.info("Database connected and schemas checked.")
 
 
-def run_startup_tasks():
-    # if os.name == 'nt':
-    #     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-    async def startup():
-        await wait_for_db()
-        await init_db()
-
-    asyncio.run(startup())
+async def close_db():
+    await Tortoise.close_connections()
 
 
 def run_scraper_job():
-    """Обгортка для запуску скрапера через schedule"""
+    """Обгортка для запуску скрапера"""
     logger.info("Starting scheduled scraper job...")
-    # if os.name == 'nt':
-    #     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    async def job_wrapper():
+        await init_db()
+        try:
+            await run_scraper()
+        finally:
+            await close_db()
 
     try:
-        asyncio.run(run_scraper())
+        asyncio.run(job_wrapper())
     except Exception as e:
         logger.error(f"Error during scraping: {e}", exc_info=True)
 
 
 def main():
-    run_startup_tasks()
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    async def startup_check():
+        await init_db()
+        await close_db()
+
+    asyncio.run(startup_check())
 
     logger.info(f"Scheduler started. Scraper set to run at {SCRAPE_TIME}")
 
     schedule.every().day.at(SCRAPE_TIME).do(run_scraper_job)
     schedule.every().day.at("23:55").do(create_dump)
 
-    # (Опціонально) Запустити скрапер одразу для тесту, розкоментуй якщо треба:
-    run_scraper_job()
-
     while True:
         try:
             schedule.run_pending()
         except Exception as e:
             logger.error(f"Critical error in scheduler: {e}", exc_info=True)
-
         time.sleep(60)
 
 
