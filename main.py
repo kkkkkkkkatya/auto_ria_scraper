@@ -1,6 +1,8 @@
 import time
 import schedule
 import logging
+import asyncio
+import os
 
 from sqlalchemy.exc import OperationalError
 from sqlalchemy import text
@@ -19,35 +21,68 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def wait_for_db():
+async def wait_for_db():
+    """Асинхронна перевірка доступності БД."""
     logger.info("Waiting for database...")
 
-    db_conn = None
-    while not db_conn:
+    while True:
         try:
-            db_conn = engine.connect()
-            db_conn.execute(text("SELECT 1"))
-            db_conn.close()
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+
             logger.info("Database available!")
             return
         except OperationalError:
             logger.warning("Database unavailable, waiting 1 second...")
-            time.sleep(1)
+            await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"Unknown DB error: {e}")
+            await asyncio.sleep(1)
 
-def init_db():
-    """Створює таблиці, якщо їх немає."""
+
+async def init_db():
+    """Асинхронне створення таблиць."""
     logger.info("Initializing database...")
-    Base.metadata.create_all(bind=engine)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     logger.info("Database initialized.")
 
 
+def run_startup_tasks():
+    # if os.name == 'nt':
+    #     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    async def startup():
+        await wait_for_db()
+        await init_db()
+
+    asyncio.run(startup())
+
+
+def run_scraper_job():
+    """Обгортка для запуску скрапера через schedule"""
+    logger.info("Starting scheduled scraper job...")
+    # if os.name == 'nt':
+    #     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    try:
+        asyncio.run(run_scraper())
+    except Exception as e:
+        logger.error(f"Error during scraping: {e}", exc_info=True)
+
+
 def main():
-    wait_for_db()
-    init_db()
+    run_startup_tasks()
 
     logger.info(f"Scheduler started. Scraper set to run at {SCRAPE_TIME}")
-    schedule.every().day.at(SCRAPE_TIME).do(run_scraper)
+
+    schedule.every().day.at(SCRAPE_TIME).do(run_scraper_job)
     schedule.every().day.at("23:55").do(create_dump)
+
+    # (Опціонально) Запустити скрапер одразу для тесту, розкоментуй якщо треба:
+    run_scraper_job()
 
     while True:
         try:

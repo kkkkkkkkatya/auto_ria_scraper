@@ -1,140 +1,158 @@
-import time
-import random
+import asyncio
 import logging
+import random
 from typing import Optional, Dict, Any
 from urllib.parse import urljoin
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
-from webdriver_manager.chrome import ChromeDriverManager
+import aiohttp
+from parsel import Selector
 
 from src.crud import create_car
 from src.config import BASE_URL
 from src.utils import clean_price, clean_odometer
+from src.database import engine
 
 
 logger = logging.getLogger(__name__)
 
+CONCURRENT_WORKERS = 3
+MAX_PAGES = 5
 
-# Driver settings
-def get_driver() -> webdriver.Chrome:
-    """Creates a driver with settings so that the site does not see that it is a bot."""
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-
-    driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
-    driver.maximize_window()
-    return driver
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+}
 
 
-def get_phone_number(driver: webdriver.Chrome) -> int:
-    """Знаходить кнопку телефону в сайдбарі (#side) і клікає через JS."""
+# def get_phone_number(driver: webdriver.Chrome) -> int:
+#     """Знаходить кнопку телефону в сайдбарі (#side) і клікає через JS."""
+#     try:
+#         wait = WebDriverWait(driver, 5)
+#
+#         phone_btn = wait.until(EC.presence_of_element_located((
+#             By.CSS_SELECTOR,
+#             "#side button.size-large.conversion"
+#         )))
+#         driver.execute_script("arguments[0].click();", phone_btn)
+#         time.sleep(2.0)
+#         phone_elements = driver.find_elements(By.CSS_SELECTOR,
+#              "a[href^='tel:'], #side a[href^='tel:'], #side button span, .popup-show-phone a")
+#
+#         for elem in phone_elements:
+#             text = elem.text.strip()
+#             clean_digits = ''.join(filter(str.isdigit, text))
+#
+#             if len(clean_digits) >= 10:
+#                 return int(clean_digits)
+#
+#         return 0
+#
+#     except Exception as e:
+#         logger.error(f"Phone error: {e}")
+#         return 0
+
+
+
+async def fetch_html(session: aiohttp.ClientSession, url: str) -> Optional[str]:
+    """
+        Fetches the raw HTML content of a URL asynchronously.
+
+        Includes a random delay to simulate human behavior and avoid rate limiting.
+
+        Args:
+            session (aiohttp.ClientSession): The active HTTP session.
+            url (str): The target URL to fetch.
+
+        Returns:
+            Optional[str]: The HTML content as a string, or None if the request fails.
+        """
     try:
-        wait = WebDriverWait(driver, 5)
-
-        phone_btn = wait.until(EC.presence_of_element_located((
-            By.CSS_SELECTOR,
-            "#side button.size-large.conversion"
-        )))
-        driver.execute_script("arguments[0].click();", phone_btn)
-        time.sleep(2.0)
-        phone_elements = driver.find_elements(By.CSS_SELECTOR,
-             "a[href^='tel:'], #side a[href^='tel:'], #side button span, .popup-show-phone a")
-
-        for elem in phone_elements:
-            text = elem.text.strip()
-            clean_digits = ''.join(filter(str.isdigit, text))
-
-            if len(clean_digits) >= 10:
-                return int(clean_digits)
-
-        return 0
-
+        await asyncio.sleep(random.uniform(0.5, 1.5))
+        async with session.get(url, headers=HEADERS) as response:
+            if response.status == 200:
+                return await response.text()
+            else:
+                logger.error(f"Failed to fetch {url}: Status {response.status}")
+                return None
     except Exception as e:
-        logger.error(f"Phone error: {e}")
-        return 0
+        logger.error(f"Error fetching {url}: {e}")
+        return None
 
 
-def parse_single_car(driver: webdriver.Chrome, url: str) -> Optional[Dict[str, Any]]:
-    """Goes to the car page and collects all the details."""
+def parse_car_data(html: str, url: str) -> Optional[Dict[str, Any]]:
+    """
+        Parses the raw HTML of a single car page to extract structured data.
+
+        Uses `parsel` with CSS selectors, XPath, and Regex to handle
+        various layout versions of Auto.ria.
+
+        Args:
+            html (str): The raw HTML content of the page.
+            url (str): The URL of the page (for reference).
+
+        Returns:
+            Optional[Dict[str, Any]]: A dictionary containing car details,
+            or None if critical errors occur during parsing.
+        """
     try:
-        driver.get(url)
-        time.sleep(random.uniform(1, 2))  # User delay
+        sel = Selector(text=html)
 
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        # 1. title
+        title = sel.css("h1.head::text").get() or sel.css("h1.titleL::text").get()
+        title = title.strip() if title else "No Title"
 
-        # TITLE
-        title_tag = soup.select_one("h1.head, h1.titleL, #heading-cars .head")
-        title = title_tag.text.strip() if title_tag else "No Title"
+        # 2. price
+        price_text = sel.css("div.price_value strong::text, #basicInfoPrice strong::text").get()
+        price_usd = clean_price(price_text)
 
-        # PRICE
-        price_tag = soup.select_one("div.price_value strong, #basicInfoPrice strong")
-        price_usd = clean_price(price_tag.text) if price_tag else 0
+        # 3. odometer
+        odometer_text = sel.re_first(r"\d{1,3}[\s\xa0]?\d{3}\s*тис\.\s*км") or \
+                        sel.re_first(r"\d+\s*тис\.\s*км")
 
-        # ODOMETER
-        odometer_tag = soup.find(
-            lambda tag: tag.name in ["span", "div"] and tag.text and "тис. км" in tag.text and len(tag.text) < 50)
-        odometer = clean_odometer(odometer_tag.text) if odometer_tag else 0
+        if not odometer_text:
+            odometer_text = sel.xpath("//*[contains(text(), 'тис. км')]/text()").get()
 
-        # USERNAME
-        username_tag = soup.select_one("#sellerInfoUserName span, .seller_info .seller_name, .seller_info_name")
-        username = username_tag.text.strip() if username_tag else "Unknown"
+        odometer = clean_odometer(odometer_text)
 
-        # VIN CODE
-        vin_tag = soup.select_one("#badgesVin, .label-vin, .vin-code, span[class*='vin-code']")
-        car_vin = vin_tag.text.strip() if vin_tag else None
+        # 4. username
+        username = sel.css("#sellerInfoUserName span::text").get() or \
+                   sel.css(".seller_info .seller_name::text").get()
+        username = username.strip() if username else "Unknown"
 
-        # CAR NUMBER
-        number_tag = soup.select_one(".state-num, .car-number span, .car-number")
-        car_number = number_tag.text.strip() if number_tag else None
+        # 5. VIN
+        car_vin = sel.css(
+            "#badgesVin span::text, " 
+            "#badgesVin::text, "
+            ".label-vin::text, "
+            ".vin-code::text, "
+            "span[class*='vin-code']::text"
+        ).get()
+        car_vin = car_vin.strip() if car_vin else None
 
-        # IMAGE URL
-        image_tag = soup.select_one(
-            "#photoSlider picture img, "  # Новий дизайн (Nissan, Audi)
-            "#photoSlider img, "  # Звичайний дизайн
-            "img.outline, "  # Старий дизайн
-            ".gallery-order-carousel img, "
-            ".photo-620x465 img"
-        )
-        image_url = image_tag.get('src') if image_tag else None
+        # 6. car_number
+        car_number = sel.css(
+            ".state-num::text, " 
+            ".car-number span::text, " 
+            ".car-number::text"
+        ).get()
+        car_number = car_number.strip() if car_number else None
 
-        # IMAGES COUNT
-        images_count = 0
+        # 7. image_url
+        image_url = sel.css("meta[property='og:image']::attr(content)").get()
 
-        # 1.
-        count_badge = soup.select_one("span.common-badge.alpha.medium")
-        if count_badge:
-            text = count_badge.get_text(strip=True)
-            if "з" in text:
-                try:
-                    parts = text.split("з")
-                    images_count = int(''.join(filter(str.isdigit, parts[-1])))
-                except ValueError:
-                    pass
+        if not image_url:
+            image_url = sel.css(
+                "#photoSlider picture img::attr(src), .photo-620x465 img::attr(src)"
+            ).get()
 
-        # 2.
-        if images_count == 0:
-            link_tag = soup.select_one("a.show-all, a.link-look-all")
-            if link_tag:
-                images_count = int(''.join(filter(str.isdigit, link_tag.text)))
+        # 8. images_count
+        images_count = len(sel.css("#photoSlider .carousel__slide"))
 
-        # 3.
-        if images_count == 0:
-            previews = soup.select(".gallery-order-carousel .m-hide, #photoSlider .carousel__slide")
-            images_count = len(previews) if previews else 0
-
-        phone_number = get_phone_number(driver)
+        # phone
+        # NOTE: Phone numbers are hidden behind a dynamic AJAX request (POST /popUp/).
+        # Getting them requires browser automation (Playwright), which slows down scraping
+        # significantly. For this version, we set it to 0.
+        phone_number = 0
 
         return {
             "url": url,
@@ -148,60 +166,133 @@ def parse_single_car(driver: webdriver.Chrome, url: str) -> Optional[Dict[str, A
             "car_number": car_number,
             "car_vin": car_vin,
         }
-
     except Exception as e:
-        logger.error(f"Error parsing car {url}: {e}")
+        logger.error(f"Parsing error on {url}: {e}")
         return None
 
 
-def run_scraper():
-    driver = get_driver()
-    page = 1
+# --- Main logic (PRODUCER - CONSUMER) ---
 
-    try:
-        while True:
-            logger.info(f"--- Processing Page {page} ---")
+async def producer(queue: asyncio.Queue, session: aiohttp.ClientSession):
+    """
+        Producer function: Iterates through pagination pages and collects car URLs.
 
-            list_url = f"{BASE_URL}?page={page}"
-            try:
-                driver.get(list_url)
-                time.sleep(2)
-            except Exception as e:
-                logger.error(f"Error loading page {page}: {e}")
-                break
+        It fetches the list page, extracts links to individual car pages,
+        and puts them into the asyncio Queue for consumers to process.
 
-            soup = BeautifulSoup(driver.page_source, "html.parser")
-            links = soup.select(".ticket-item .m-link-ticket")
+        Args:
+            queue (asyncio.Queue): The shared work queue.
+            session (aiohttp.ClientSession): The HTTP session.
+        """
+    logger.info("--- Producer started ---")
 
-            if not links:
-                logger.info("No more cars found. Finishing.")
-                break
+    for page in range(1, MAX_PAGES + 1):
+        list_url = f"{BASE_URL}?page={page}"
+        logger.info(f"[Producer] Reading Page {page}...")
 
-            logger.info(f"Found {len(links)} cars on page {page}")
+        html = await fetch_html(session, list_url)
 
-            for link_tag in links:
-                raw_url = link_tag.get('href')
+        if not html:
+            logger.warning(f"[Producer] Page {page} is empty or failed.")
+            continue
 
-                if not raw_url or "javascript" in raw_url:
-                    continue
+        sel = Selector(text=html)
+        links = sel.css(".ticket-item .m-link-ticket::attr(href)").getall()
 
-                if "/newauto/" in raw_url:
-                    continue
+        if not links:
+            logger.info("[Producer] No more cars found. Stopping.")
+            break
 
-                car_url = urljoin(BASE_URL, raw_url)
+        count = 0
+        for link in links:
+            if "javascript" not in link and "/newauto/" not in link:
+                full_url = urljoin(BASE_URL, link)
+                await queue.put(full_url)
+                count += 1
 
-                car_data = parse_single_car(driver, car_url)
+        logger.info(f"[Producer] +{count} cars added to queue.")
 
-                if car_data:
-                    create_car(car_data)
+    logger.info("--- Producer finished. No more pages. ---")
 
-            page += 1
 
-    except Exception as e:
-        logger.error(f"Global error: {e}")
-    finally:
+async def consumer(worker_id: int, queue: asyncio.Queue, session: aiohttp.ClientSession):
+    """
+        Consumer (Worker) function: Processes URLs from the queue.
+
+        1. Gets a URL from the queue.
+        2. Fetches the HTML.
+        3. Parses the data.
+        4. Saves it to the database.
+
+        Args:
+            worker_id (int): ID of the worker for logging purposes.
+            queue (asyncio.Queue): The shared work queue.
+            session (aiohttp.ClientSession): The HTTP session.
+        """
+    logger.info(f"Worker {worker_id} ready.")
+
+    while True:
+        url = await queue.get()
+
+        if url is None:
+            queue.task_done()
+            break
+
         try:
-            driver.quit()
-            logger.info("Driver closed successfully.")
-        except:
-            pass
+            html = await fetch_html(session, url)
+
+            if html:
+                car_data = parse_car_data(html, url)
+                if car_data:
+                    await create_car(car_data)
+                    logger.info(f"[Worker {worker_id}] Saved: {car_data['title']}")
+
+        except Exception as e:
+            logger.error(f"[Worker {worker_id}] Error: {e}")
+
+        finally:
+            queue.task_done()
+
+    logger.info(f"Worker {worker_id} going home.")
+
+
+async def run_scraper():
+    """
+        Main orchestrator function.
+
+        1. Initializes the Queue and HTTP Session.
+        2. Spawns Consumer workers (background tasks).
+        3. Runs the Producer to fill the queue.
+        4. Waits for the queue to be empty.
+        5. Sends stop signals to workers.
+        """
+    queue = asyncio.Queue()
+
+    async with aiohttp.ClientSession() as session:
+        consumers = [asyncio.create_task(consumer(i, queue, session)) for i in range(CONCURRENT_WORKERS)]
+
+        await producer(queue, session)
+
+        await queue.join()
+
+        for _ in range(CONCURRENT_WORKERS):
+            await queue.put(None)
+
+        logger.info("Waiting for workers to finish...")
+
+        done, pending = await asyncio.wait(consumers, return_when=asyncio.ALL_COMPLETED)
+
+        for task in done:
+            if task.exception():
+                logger.error(f"One worker failed with error: {task.exception()}")
+
+    logger.info("Cleaning up database connections...")
+    await engine.dispose()
+
+    logger.info("All scraping finished successfully.")
+
+
+# if __name__ == "__main__":
+#     logging.basicConfig(level=logging.INFO)
+#     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+#     asyncio.run(run_scraper())
