@@ -1,39 +1,29 @@
-# Використовуємо легкий образ Python
-FROM python:3.11-slim
+# Використовуємо стабільну версію Bullseye (важливо для Docker Toolbox)
+FROM python:3.11-slim-bullseye
 
-# Встановлюємо змінні оточення для Python
+# Встановлюємо змінні оточення
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Встановлюємо робочу директорію
+# Робоча директорія
 WORKDIR /app
 
-# 1. Встановлюємо системні залежності та PostgreSQL Client
-# Додаємо --fix-missing для стабільності
-RUN apt-get update --fix-missing && apt-get install -y \
-    wget \
-    gnupg \
-    unzip \
-    curl \
+# 1. Встановлюємо системні залежності
+# Використовуємо --no-install-recommends для зменшення сміття
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Встановлюємо Google Chrome (НОВИЙ МЕТОД: через .deb файл)
-# Цей метод не потребує apt-key і працює на Debian 12
-RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get update \
-    && apt-get install -y ./google-chrome-stable_current_amd64.deb \
-    && rm google-chrome-stable_current_amd64.deb \
-    && rm -rf /var/lib/apt/lists/*
-
-# 3. Копіюємо файл із залежностями
+# 2. Копіюємо файл залежностей
 COPY requirements.txt .
 
-# 4. Встановлюємо Python-бібліотеки
+# 3. Встановлюємо бібліотеки
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. Копіюємо весь код проєкту в контейнер
+# 4. Копіюємо код
 COPY . .
 
-# 6. Запускаємо main.py
+# 5. Запуск
 CMD ["python", "main.py"]

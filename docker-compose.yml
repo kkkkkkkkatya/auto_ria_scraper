@@ -1,8 +1,8 @@
-version: '3.8'
+version: '3.3'
 
 services:
   db:
-    image: postgres:15
+    image: postgres:11
     container_name: autoria_postgres
     restart: always
     environment:
@@ -26,7 +26,7 @@ services:
       DB_HOST: db
     volumes:
       - ./dumps:/app/dumps
-    shm_size: '2gb'
+#    shm_size: '2gb'
 
 volumes:
   postgres_data:
